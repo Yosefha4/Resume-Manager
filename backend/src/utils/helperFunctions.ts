@@ -13,3 +13,7 @@ export function getS3PdfKey(key: string): string {
   export function usePdfForDocxInS3(filePath: string, isUsingS3: boolean): boolean {
     return !!isUsingS3 && !!filePath && filePath.toLowerCase().endsWith('.docx');
   }
+
+  export function usePdfDisplayForDocxInS3(fileName: string | null | undefined, isUsingS3: boolean): boolean {
+    return !!isUsingS3 && !!fileName && fileName.toLowerCase().endsWith('.docx');
+  }
