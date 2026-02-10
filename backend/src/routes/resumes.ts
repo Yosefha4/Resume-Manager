@@ -10,6 +10,7 @@ import { aiService } from '../services/ai';
 import { resumeParser } from '../services/resumeParser';
 import { resumeGenerator } from '../services/resumeGenerator';
 import pool from '../db';
+import { getS3PdfFileName, usePdfDisplayForDocxInS3 } from '../utils/helperFunctions';
 
 const router = express.Router();
 
@@ -17,14 +18,20 @@ const router = express.Router();
 router.use(authenticateToken);
 
 // Get all resumes for the authenticated user
+// Get all resumes for the authenticated user
 router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.userId!;
     const resumes = await ResumeModel.findByUserId(userId);
 
-    res.json({
-      resumes
+    const mapped = resumes.map((r) => {
+      if (usePdfDisplayForDocxInS3(r.file_name, isUsingS3)) {
+        return { ...r, file_name: getS3PdfFileName(r.file_name), file_type: 'application/pdf' };
+      }
+      return r;
     });
+
+    res.json({ resumes: mapped });
   } catch (error) {
     console.error('Get resumes error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -62,11 +69,11 @@ router.get('/:id/versions/:versionNumber/download', async (req: AuthRequest, res
       // Download from S3 - stream through server
       try {
         const buffer = await s3Service.getFileBuffer(version.file_path);
-        
+
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(version.file_name)}"`);
         res.setHeader('Content-Type', version.file_type || 'application/octet-stream');
         res.setHeader('Content-Length', buffer.length);
-        
+
         res.send(buffer);
       } catch (error) {
         console.error('Error downloading file from S3:', error);
@@ -126,16 +133,16 @@ router.get('/:id/versions', async (req: AuthRequest, res: Response): Promise<voi
     });
   } catch (error: any) {
     console.error('Get versions error:', error);
-    
+
     // Check if it's a table doesn't exist error
     if (error.code === '42P01') {
-      res.status(500).json({ 
-        error: 'Version system not initialized. Please run: npm run migrate-versions' 
+      res.status(500).json({
+        error: 'Version system not initialized. Please run: npm run migrate-versions'
       });
       return;
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: error.message || 'Internal server error',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -300,9 +307,9 @@ router.post('/generate', async (req: AuthRequest, res: Response): Promise<void> 
       .replace(/\s+/g, '-')
       .toLowerCase()
       .substring(0, 50);
-    
+
     const fileName = `${cleanJobTitle}-${uniqueSuffix}.docx`;
-    const filePath = isUsingS3 
+    const filePath = isUsingS3
       ? `resumes/${fileName}`
       : path.join(__dirname, '../../uploads', fileName);
 
@@ -332,8 +339,8 @@ router.post('/generate', async (req: AuthRequest, res: Response): Promise<void> 
     });
   } catch (error: any) {
     console.error('Generate resume error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to generate resume' 
+    res.status(500).json({
+      error: error.message || 'Failed to generate resume'
     });
   }
 });
@@ -441,7 +448,7 @@ router.get('/:id/download', async (req: AuthRequest, res: Response): Promise<voi
 
     // Get the latest version, or fallback to resume's file_path if no versions exist
     let currentVersion = await ResumeVersionModel.getCurrentVersion(resumeId);
-    
+
     // Fallback for resumes that don't have versions yet (before migration)
     if (!currentVersion) {
       // Use resume's file_path as fallback
@@ -479,12 +486,12 @@ router.get('/:id/download', async (req: AuthRequest, res: Response): Promise<voi
       // Download from S3 - stream through server to avoid CORS issues
       try {
         const buffer = await s3Service.getFileBuffer(currentVersion.file_path);
-        
+
         // Set headers for file download
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(currentVersion.file_name)}"`);
         res.setHeader('Content-Type', currentVersion.file_type || 'application/octet-stream');
         res.setHeader('Content-Length', buffer.length);
-        
+
         // Send the buffer
         res.send(buffer);
       } catch (error) {
@@ -604,7 +611,7 @@ router.post('/:id/versions', upload.single('file'), async (req: AuthRequest, res
 
     // Get next version number
     let latestVersion = await ResumeVersionModel.getLatestVersionNumber(resumeId);
-    
+
     // If no versions exist yet, check if resume has file_path (pre-versioning resumes)
     if (latestVersion === 0) {
       // Check if resume has a file_path (old resumes before versioning)
@@ -621,7 +628,7 @@ router.post('/:id/versions', upload.single('file'), async (req: AuthRequest, res
         latestVersion = 1;
       }
     }
-    
+
     const nextVersion = latestVersion + 1;
 
     // Generate filename based on resume title + version number
@@ -633,21 +640,21 @@ router.post('/:id/versions', upload.single('file'), async (req: AuthRequest, res
       .toLowerCase()
       .trim()
       .substring(0, 100);
-    
+
     const versionFileName = `${cleanTitle}-v${nextVersion}${ext}`;
 
     // Get file path/key (already uploaded by multer)
     let filePath = isUsingS3 ? (req.file as any).key : req.file.path;
-    
+
     // For S3, we need to rename the file by copying it with new key
     if (isUsingS3) {
       try {
         // Get the uploaded file
         const buffer = await s3Service.getFileBuffer(filePath);
-        
+
         // Delete the old file
         await s3Service.deleteFile(filePath);
-        
+
         // Upload with new name
         const newKey = `resumes/${versionFileName}`;
         await s3Service.uploadFile(newKey, buffer, req.file.mimetype);
